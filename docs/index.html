@@ -514,8 +514,9 @@
         <div class="control-item">
           <label class="control-label">RENDER MODE</label>
           <select id="selMode" class="select-field">
-            <option value="dither">Floyd-Steinberg Dither</option>
-            <option value="threshold">Binary Threshold</option>
+            <option value="color" selected>Full Color (Motion-JPEG) [Crisp & Smooth - No Dots]</option>
+            <option value="threshold">High-Contrast B&W (Threshold - Clean, No Dots)</option>
+            <option value="dither">Retro Dot-Matrix (Floyd-Steinberg Dither)</option>
           </select>
         </div>
 
@@ -835,17 +836,36 @@
         ctx.drawImage(video, 0, 0, vw, vh, dx, dy, dw, dh);
       }
 
-      // Extract pixel data & apply dithering
+      // 1) Full Color Motion-JPEG Mode (Ultra Smooth & Continuous Tone - No Dots!)
+      if (mode === 'color') {
+        if (socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount <= 16384) {
+          canvas.toBlob((blob) => {
+            if (!blob || !isStreaming || !socket || socket.readyState !== WebSocket.OPEN) return;
+            if (socket.bufferedAmount > 16384) return;
+            blob.arrayBuffer().then((buf) => {
+              if (socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount <= 16384) {
+                socket.send(buf);
+                bytesSent += buf.byteLength;
+                frameCount++;
+              }
+            });
+          }, 'image/jpeg', 0.65);
+        }
+        updateTelemetry();
+        return;
+      }
+
+      // 2) Monochrome Modes (Threshold or Retro Dither)
       const imgData = ctx.getImageData(0, 0, targetW, targetH);
       const binaryMap = (mode === 'dither') ? ditherFloydSteinberg(imgData, targetW, targetH) : thresholdBinary(imgData, targetW, targetH);
 
-      // Re-draw processed binary pixels onto canvas for preview
+      // Re-draw processed binary pixels onto canvas for preview (Clean B&W)
       for (let i = 0; i < targetW * targetH; i++) {
         const val = binaryMap[i] ? 255 : 0;
         const idx = i * 4;
-        imgData.data[idx]     = (targetDisp === 'st7789-native' && val) ? 0 : val;   // R
-        imgData.data[idx + 1] = (targetDisp === 'st7789-native' && val) ? 240 : val; // G (Cyber green/cyan)
-        imgData.data[idx + 2] = (targetDisp === 'st7789-native' && val) ? 255 : val; // B
+        imgData.data[idx]     = val; // R
+        imgData.data[idx + 1] = val; // G
+        imgData.data[idx + 2] = val; // B
         imgData.data[idx + 3] = 255;
       }
       ctx.putImageData(imgData, 0, 0);

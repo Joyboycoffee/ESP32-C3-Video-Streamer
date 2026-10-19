@@ -92,6 +92,33 @@ def encode_frame_st7789_native(bgr, mode="dither", fit="crop"):
         chunks.append(raw[i * chunk_size:(i + 1) * chunk_size])
     return chunks
 
+def encode_frame_jpeg(bgr, fit="crop", quality=65):
+    WIDTH, HEIGHT = 240, 240
+    h, w = bgr.shape[:2]
+    if fit == "crop":
+        dim = min(h, w)
+        sy = (h - dim) // 2
+        sx = (w - dim) // 2
+        cropped = bgr[sy:sy + dim, sx:sx + dim]
+        resized = cv2.resize(cropped, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+    else:
+        scale = min(WIDTH / w, HEIGHT / h)
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        res = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+        resized = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+        y_off = (HEIGHT - nh) // 2
+        x_off = (WIDTH - nw) // 2
+        resized[y_off:y_off + nh, x_off:x_off + nw] = res
+
+    ret, jpeg_buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    raw = jpeg_buf.tobytes()
+    chunk_size = 1200
+    total_chunks = (len(raw) + chunk_size - 1) // chunk_size
+    chunks = []
+    for i in range(total_chunks):
+        chunks.append((i, total_chunks, raw[i * chunk_size:(i + 1) * chunk_size]))
+    return chunks
+
 def main():
     parser = argparse.ArgumentParser(
         description="Stream MP4/AVI/GIF video to ESP32-C3 (ST7789 IPS or SSD1306 OLED) over Wi-Fi UDP"
@@ -102,11 +129,16 @@ def main():
     parser.add_argument("--fps", type=float, default=12.0, help="Output streaming FPS (default: 12)")
     parser.add_argument(
         "--display",
-        choices=["oled", "st7789", "st7789-native"],
-        default="oled",
-        help="Target display: 'oled' (128x64 VID0 protocol, works on OLED & ST7789 HUD) or 'st7789-native' (240x240 V240 protocol)",
+        choices=["st7789-native", "st7789", "oled"],
+        default="st7789-native",
+        help="Target display: 'st7789-native' (240x240 full screen) or 'oled' (128x64)",
     )
-    parser.add_argument("--mode", choices=["dither", "threshold"], default="dither", help="Rendering mode (default: dither)")
+    parser.add_argument(
+        "--mode",
+        choices=["color", "threshold", "dither"],
+        default="color",
+        help="Rendering mode: 'color' (Full Color Motion-JPEG, default), 'threshold' (Clean B&W), 'dither' (Retro dots)",
+    )
     parser.add_argument("--fit", choices=["crop", "letterbox"], default="crop", help="Aspect ratio fit (default: crop)")
     args = parser.parse_args()
 
@@ -128,7 +160,7 @@ def main():
     print(f"File:       {args.video} ({total_frames} frames)")
     print(f"Source FPS: {source_fps:.2f} | Stream FPS: {args.fps:.2f}")
     print(f"Target:     {args.ip}:{args.port}")
-    print(f"Display:    {args.display.upper()} | Mode: {args.mode} | Fit: {args.fit}")
+    print(f"Display:    {args.display.upper()} | Mode: {args.mode.upper()} | Fit: {args.fit}")
     print("-" * 60)
     print("Streaming started... Press Ctrl+C to stop.")
 
@@ -156,8 +188,14 @@ def main():
             if delay > 0:
                 time.sleep(delay)
 
-            # Send according to display mode
-            if args.display in ["oled", "st7789"]:
+            # Send according to mode and display
+            if args.mode == "color" or args.display == "st7789-color":
+                chunks = encode_frame_jpeg(frame, args.fit, quality=65)
+                seq_bytes = (sent & 0xFFFF).to_bytes(2, "big")
+                for chunk_idx, total_chunks, chunk_data in chunks:
+                    header = b"JPG0" + bytes([chunk_idx, total_chunks]) + seq_bytes
+                    sock.sendto(header + chunk_data, (args.ip, args.port))
+            elif args.display in ["oled", "st7789"]:
                 # Standard VID0 protocol (128x64 dithered)
                 payload = b"VID0" + encode_frame_oled(frame, args.mode, args.fit)
                 sock.sendto(payload, (args.ip, args.port))

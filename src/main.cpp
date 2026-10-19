@@ -46,7 +46,9 @@ const uint16_t THEME_COLORS[] = { TFT_WHITE, 0x07FF, 0x07E0, 0xFBE0 };
 
 // Buffers
 uint8_t rxPacket[1500];
-uint8_t wsBuffer[8192];
+uint8_t wsBuffer[16384];
+uint8_t udpJpegBuf[16384];
+size_t udpJpegLen = 0;
 
 // =========================================================================
 // WEBSOCKET RFC 6455 HANDSHAKE (ZERO-DEPENDENCY MBEDTLS)
@@ -160,6 +162,53 @@ void renderVid0Frame(const uint8_t* raw) {
 // WEBSOCKET & UDP VIDEO FRAME PROCESSOR (INSTANT DMA BLIT)
 // =========================================================================
 void processRawVideoPayload(const uint8_t* data, size_t len) {
+    // 1) Direct JPEG Payload (Full Color Video from Web/Browser!)
+    if (len >= 2 && data[0] == 0xFF && data[1] == 0xD8) {
+        if (!inStreamMode || isVid0Active) {
+            inStreamMode = true;
+            isVid0Active = false;
+        }
+        tft.drawJpg(data, len, 0, 0);
+        frameCount++;
+        lastFrameArrival = millis();
+        return;
+    }
+
+    // 2) Prefixed JPEG Payload ("JPEG" + raw jpeg)
+    if (len >= 6 && memcmp(data, "JPEG", 4) == 0 && data[4] == 0xFF && data[5] == 0xD8) {
+        if (!inStreamMode || isVid0Active) {
+            inStreamMode = true;
+            isVid0Active = false;
+        }
+        tft.drawJpg(data + 4, len - 4, 0, 0);
+        frameCount++;
+        lastFrameArrival = millis();
+        return;
+    }
+
+    // 3) Chunked UDP JPEG Payload ("JPG0" + chunkIdx(1B) + totalChunks(1B) + seq(2B) + data)
+    if (len >= 8 && memcmp(data, "JPG0", 4) == 0) {
+        uint8_t chunkIdx = data[4];
+        uint8_t totalChunks = data[5];
+        if (chunkIdx == 0) udpJpegLen = 0;
+        size_t chunkDataLen = len - 8;
+        if (udpJpegLen + chunkDataLen <= sizeof(udpJpegBuf)) {
+            memcpy(udpJpegBuf + udpJpegLen, data + 8, chunkDataLen);
+            udpJpegLen += chunkDataLen;
+        }
+        if (chunkIdx == totalChunks - 1 && udpJpegLen >= 2) {
+            if (!inStreamMode || isVid0Active) {
+                inStreamMode = true;
+                isVid0Active = false;
+            }
+            tft.drawJpg(udpJpegBuf, udpJpegLen, 0, 0);
+            frameCount++;
+            lastFrameArrival = millis();
+        }
+        return;
+    }
+
+    // 4) Retro 128x64 OLED VID0 Payload
     if (len >= 4 && memcmp(data, "VID0", 4) == 0 && len >= VID0_PACKET) {
         if (!inStreamMode || !isVid0Active) {
             inStreamMode = true;
@@ -170,7 +219,11 @@ void processRawVideoPayload(const uint8_t* data, size_t len) {
         renderVid0Frame(data + 4);
         frameCount++;
         lastFrameArrival = millis();
-    } else if (len >= 4 && memcmp(data, "V240", 4) == 0) {
+        return;
+    }
+
+    // 5) Retro 240x240 1-bit Monochrome V240 Payload
+    if (len >= 4 && memcmp(data, "V240", 4) == 0) {
         if (!inStreamMode || isVid0Active) {
             inStreamMode = true;
             isVid0Active = false;
@@ -197,6 +250,7 @@ void processRawVideoPayload(const uint8_t* data, size_t len) {
             }
         }
         lastFrameArrival = millis();
+        return;
     }
 }
 
@@ -275,17 +329,23 @@ void handleWebSocketClient() {
 
         size_t bytesRead = 0;
         unsigned long readStart = millis();
-        while (bytesRead < payloadLen && (millis() - readStart < 250)) {
+        while (bytesRead < payloadLen && (millis() - readStart < 350)) {
             size_t avail = wsClient.available();
             if (avail > 0) {
                 size_t toRead = (payloadLen - bytesRead < avail) ? (payloadLen - bytesRead) : avail;
                 int r = wsClient.read(wsBuffer + bytesRead, toRead);
                 if (r > 0) bytesRead += r;
             } else {
-                delayMicroseconds(50);
+                delay(1);
             }
         }
-        if (bytesRead < payloadLen) return;
+        if (bytesRead < payloadLen) {
+            while (wsClient.available() && bytesRead < payloadLen) {
+                wsClient.read();
+                bytesRead++;
+            }
+            return;
+        }
 
         if (isMasked) {
             for (size_t i = 0; i < payloadLen; i++) {

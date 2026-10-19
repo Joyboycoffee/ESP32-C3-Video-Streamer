@@ -79,6 +79,33 @@ def encode_frame_st7789_native(bgr, mode="dither", fit="crop"):
         chunks.append(raw[i * chunk_size:(i + 1) * chunk_size])
     return chunks
 
+def encode_frame_jpeg(bgr, fit="crop", quality=65):
+    WIDTH, HEIGHT = 240, 240
+    h, w = bgr.shape[:2]
+    if fit == "crop":
+        dim = min(h, w)
+        sy = (h - dim) // 2
+        sx = (w - dim) // 2
+        cropped = bgr[sy:sy + dim, sx:sx + dim]
+        resized = cv2.resize(cropped, (WIDTH, HEIGHT), interpolation=cv2.INTER_AREA)
+    else:
+        scale = min(WIDTH / w, HEIGHT / h)
+        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
+        res = cv2.resize(bgr, (nw, nh), interpolation=cv2.INTER_AREA)
+        resized = np.zeros((HEIGHT, WIDTH, 3), dtype=np.uint8)
+        y_off = (HEIGHT - nh) // 2
+        x_off = (WIDTH - nw) // 2
+        resized[y_off:y_off + nh, x_off:x_off + nw] = res
+
+    ret, jpeg_buf = cv2.imencode('.jpg', resized, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    raw = jpeg_buf.tobytes()
+    chunk_size = 1200
+    total_chunks = (len(raw) + chunk_size - 1) // chunk_size
+    chunks = []
+    for i in range(total_chunks):
+        chunks.append((i, total_chunks, raw[i * chunk_size:(i + 1) * chunk_size]))
+    return chunks
+
 class StreamEngine:
     def __init__(self):
         self.running = False
@@ -139,7 +166,13 @@ class StreamEngine:
                 if delay > 0:
                     time.sleep(delay)
 
-                if display in ["oled", "st7789", "st7789-hud"]:
+                if mode == "color" or display == "st7789-color":
+                    chunks = encode_frame_jpeg(frame, fit, quality=65)
+                    seq_bytes = (sent & 0xFFFF).to_bytes(2, "big")
+                    for chunk_idx, total_chunks, chunk_data in chunks:
+                        header = b"JPG0" + bytes([chunk_idx, total_chunks]) + seq_bytes
+                        sock.sendto(header + chunk_data, (ip, port))
+                elif display in ["oled", "st7789", "st7789-hud"]:
                     payload = b"VID0" + encode_frame_oled(frame, mode, fit)
                     sock.sendto(payload, (ip, port))
                 else:
@@ -239,7 +272,7 @@ def run_gui():
     spn_fps.grid(row=0, column=3, padx=6, pady=4)
 
     tk.Label(row_opts, text="RENDER:", bg=SURFACE, fg=MUTED, font=("Segoe UI", 8, "bold")).grid(row=1, column=0, sticky="w", pady=4)
-    cmb_mode = ttk.Combobox(row_opts, values=["Floyd-Steinberg Dither", "Binary Threshold"], width=20, state="readonly")
+    cmb_mode = ttk.Combobox(row_opts, values=["Full Color (Motion-JPEG)", "Binary Threshold", "Floyd-Steinberg Dither"], width=20, state="readonly")
     cmb_mode.current(0)
     cmb_mode.grid(row=1, column=1, padx=6, pady=4)
 
@@ -288,7 +321,12 @@ def run_gui():
                 "SSD1306 128x64 OLED": "oled"
             }
             d_val = disp_map.get(cmb_disp.get(), "st7789-native")
-            m_val = "dither" if "Dither" in cmb_mode.get() else "threshold"
+            if "Color" in cmb_mode.get():
+                m_val = "color"
+            elif "Dither" in cmb_mode.get():
+                m_val = "dither"
+            else:
+                m_val = "threshold"
             f_val = "crop" if "Crop" in cmb_fit.get() else "letterbox"
             try:
                 fps_val = float(spn_fps.get())

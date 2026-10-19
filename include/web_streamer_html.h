@@ -119,8 +119,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <div class="control-item">
           <label class="control-label">RENDER</label>
           <select id="selMode" class="select-field">
-            <option value="dither">Floyd-Steinberg</option>
+            <option value="color" selected>Full Color (Motion-JPEG)</option>
             <option value="threshold">Binary Threshold</option>
+            <option value="dither">Retro Dither</option>
           </select>
         </div>
         <div class="control-item">
@@ -248,6 +249,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     function processFrame() {
       if (!isStreaming || !video.videoWidth) return;
       const targetDisp = document.getElementById('selDisplay').value;
+      const mode = document.getElementById('selMode').value;
       const targetW = (targetDisp === 'ssd1306' || targetDisp === 'st7789-hud') ? 128 : 240;
       const targetH = (targetDisp === 'ssd1306' || targetDisp === 'st7789-hud') ? 64 : 240;
       ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -259,14 +261,27 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         const sc = Math.min(targetW / vw, targetH / vh);
         ctx.drawImage(video, 0, 0, vw, vh, (targetW - vw*sc)/2, (targetH - vh*sc)/2, vw*sc, vh*sc);
       }
+
+      if (mode === 'color') {
+        if (socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount <= 16384) {
+          canvas.toBlob((blob) => {
+            if (!blob || !isStreaming || !socket || socket.readyState !== WebSocket.OPEN) return;
+            if (socket.bufferedAmount > 16384) return;
+            blob.arrayBuffer().then((buf) => {
+              if (socket && socket.readyState === WebSocket.OPEN && socket.bufferedAmount <= 16384) {
+                socket.send(buf); bytesSent += buf.byteLength; frameCount++;
+              }
+            });
+          }, 'image/jpeg', 0.65);
+        }
+        return;
+      }
+
       const imgData = ctx.getImageData(0, 0, targetW, targetH);
-      const bin = (document.getElementById('selMode').value === 'dither') ? ditherFS(imgData, targetW, targetH) : thresh(imgData, targetW, targetH);
+      const bin = (mode === 'dither') ? ditherFS(imgData, targetW, targetH) : thresh(imgData, targetW, targetH);
       for (let i = 0; i < targetW * targetH; i++) {
         const val = bin[i] ? 255 : 0, idx = i * 4;
-        imgData.data[idx] = (targetDisp === 'st7789-native' && val) ? 0 : val;
-        imgData.data[idx+1] = (targetDisp === 'st7789-native' && val) ? 240 : val;
-        imgData.data[idx+2] = (targetDisp === 'st7789-native' && val) ? 255 : val;
-        imgData.data[idx+3] = 255;
+        imgData.data[idx] = val; imgData.data[idx+1] = val; imgData.data[idx+2] = val; imgData.data[idx+3] = 255;
       }
       ctx.putImageData(imgData, 0, 0);
 
