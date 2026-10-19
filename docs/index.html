@@ -1,0 +1,1040 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>ESP32-C3 Video Streamer // Web Deck</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect width='100' height='100' rx='20' fill='%230B0D10'/><polygon points='30,20 80,50 30,80' fill='%2300F0FF'/></svg>">
+  <style>
+    :root {
+      --bg: #0B0D10;
+      --surface: #13171D;
+      --surface-raised: #1A2028;
+      --border: #262F3D;
+      --border-accent: #3A475C;
+      --cyan: #00F0FF;
+      --amber: #FFB800;
+      --emerald: #00FF66;
+      --crimson: #FF3366;
+      --text: #F0F4F8;
+      --text-muted: #8E9BAE;
+      --text-dim: #546274;
+      --radius: 10px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "JetBrains Mono", monospace;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 16px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 760px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* HEADER */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 18px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .brand-logo {
+      background: var(--cyan);
+      color: #000;
+      font-weight: 900;
+      font-size: 0.75rem;
+      padding: 4px 8px;
+      border-radius: 6px;
+      letter-spacing: 1px;
+    }
+
+    .brand-title {
+      font-size: 0.95rem;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+    }
+
+    .header-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-tool {
+      background: var(--surface-raised);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 12px;
+      font-size: 0.75rem;
+      font-weight: 700;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+
+    .btn-tool:hover {
+      border-color: var(--cyan);
+      color: var(--cyan);
+    }
+
+    /* CONNECTION BAR */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .conn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .input-group {
+      flex: 1;
+      min-width: 200px;
+      display: flex;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .input-prefix {
+      padding: 8px 12px;
+      background: var(--surface-raised);
+      color: var(--text-dim);
+      font-size: 0.75rem;
+      font-weight: 700;
+      border-right: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+    }
+
+    .input-field {
+      flex: 1;
+      background: transparent;
+      border: none;
+      padding: 8px 12px;
+      color: var(--text);
+      font-size: 0.85rem;
+      outline: none;
+    }
+
+    .btn-primary {
+      background: var(--cyan);
+      color: #000;
+      border: none;
+      padding: 8px 18px;
+      font-size: 0.82rem;
+      font-weight: 800;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn-primary:hover {
+      opacity: 0.9;
+      transform: translateY(-1px);
+    }
+
+    .btn-danger {
+      background: var(--crimson);
+      color: #fff;
+      border: none;
+      padding: 8px 18px;
+      font-size: 0.82rem;
+      font-weight: 800;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 0.7rem;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      border: 1px solid var(--border);
+    }
+
+    .badge-offline { background: rgba(255, 51, 102, 0.1); color: var(--crimson); border-color: rgba(255, 51, 102, 0.3); }
+    .badge-connecting { background: rgba(255, 184, 0, 0.1); color: var(--amber); border-color: rgba(255, 184, 0, 0.3); }
+    .badge-online { background: rgba(0, 255, 102, 0.1); color: var(--emerald); border-color: rgba(0, 255, 102, 0.3); }
+
+    .pulse-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    /* PREVIEW & CONTROLS GRID */
+    .preview-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    @media (max-width: 620px) {
+      .preview-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    .preview-box {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .preview-title {
+      width: 100%;
+      font-size: 0.72rem;
+      font-weight: 800;
+      color: var(--text-muted);
+      letter-spacing: 0.8px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .canvas-frame {
+      width: 100%;
+      height: 220px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+    }
+
+    #streamCanvas {
+      image-rendering: pixelated;
+      max-width: 100%;
+      max-height: 100%;
+    }
+
+    #videoPlayer {
+      max-width: 100%;
+      max-height: 100%;
+      border-radius: 4px;
+    }
+
+    /* CONTROLS BAR */
+    .controls-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 10px;
+    }
+
+    .control-item {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .control-label {
+      font-size: 0.7rem;
+      font-weight: 800;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+
+    .select-field {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 10px;
+      border-radius: 6px;
+      font-size: 0.78rem;
+      font-weight: 700;
+      outline: none;
+    }
+
+    /* TELEMETRY HUD */
+    .telemetry-row {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 8px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 14px;
+    }
+
+    @media (max-width: 500px) {
+      .telemetry-row {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    .stat-pod {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .stat-label {
+      font-size: 0.65rem;
+      font-weight: 700;
+      color: var(--text-dim);
+      letter-spacing: 0.6px;
+    }
+
+    .stat-value {
+      font-size: 0.95rem;
+      font-weight: 900;
+      color: var(--cyan);
+    }
+
+    /* DROPZONE & BUTTONS */
+    .dropzone {
+      border: 2px dashed var(--border);
+      border-radius: 8px;
+      padding: 24px 16px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.2s;
+      background: rgba(0, 240, 255, 0.02);
+    }
+
+    .dropzone:hover, .dropzone.dragover {
+      border-color: var(--cyan);
+      background: rgba(0, 240, 255, 0.06);
+    }
+
+    .dropzone-text {
+      font-size: 0.85rem;
+      font-weight: 800;
+      color: var(--text);
+      margin-bottom: 4px;
+    }
+
+    .dropzone-sub {
+      font-size: 0.72rem;
+      color: var(--text-dim);
+    }
+
+    /* MODAL */
+    .modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.85);
+      backdrop-filter: blur(4px);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      z-index: 1000;
+    }
+
+    .modal-backdrop.active {
+      display: flex;
+    }
+
+    .modal-card {
+      background: var(--surface);
+      border: 1px solid var(--border-accent);
+      border-radius: var(--radius);
+      width: 100%;
+      max-width: 480px;
+      overflow: hidden;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+    }
+
+    .modal-header {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-body {
+      padding: 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      max-height: 70vh;
+      overflow-y: auto;
+    }
+
+    .wifi-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .wifi-item:hover {
+      border-color: var(--cyan);
+      background: var(--surface-raised);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="container">
+    
+    <!-- TOP HEADER -->
+    <header class="header">
+      <div class="brand">
+        <span class="brand-logo">ESP32-C3</span>
+        <span class="brand-title">WIRELESS VIDEO STREAMER</span>
+      </div>
+      <div class="header-tools">
+        <button class="btn-tool" onclick="openWifiModal()" title="Configure ESP32 Wi-Fi Station Mode">⚙️ WI-FI</button>
+        <button class="btn-tool" onclick="toggleCamera()" id="btnCamera" title="Stream live webcam or phone camera">📷 CAMERA</button>
+      </div>
+    </header>
+
+    <!-- CONNECTION MATRIX CARD -->
+    <div class="card">
+      <div class="conn-row">
+        <div class="input-group">
+          <span class="input-prefix">WS://</span>
+          <input type="text" id="espIpInput" class="input-field" placeholder="192.168.4.1 (Hotspot) or Local IP" value="">
+          <span class="input-prefix">:81</span>
+        </div>
+        <button class="btn-primary" id="btnConnect" onclick="toggleConnection()">CONNECT</button>
+        <div id="statusBadge" class="status-badge badge-offline">
+          <span class="pulse-dot"></span>
+          <span id="statusText">DISCONNECTED</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- VIDEO DROPZONE & SOURCE PICKER -->
+    <div class="card">
+      <div class="dropzone" id="dropzone" onclick="document.getElementById('videoFileInput').click()">
+        <input type="file" id="videoFileInput" accept="video/*,.mp4,.webm,.mov,.avi,.gif" style="display:none;" onchange="handleFileSelect(event)">
+        <div class="dropzone-text">📁 CHOOSE ANY VIDEO (MP4, WEBM, GIF)</div>
+        <div class="dropzone-sub">Click to browse or drag & drop video file here (Processed 100% locally in browser)</div>
+      </div>
+    </div>
+
+    <!-- PREVIEWS: SOURCE VS DITHERED DISPLAY SIMULATOR -->
+    <div class="preview-grid">
+      
+      <!-- BOX 1: SOURCE VIDEO -->
+      <div class="preview-box">
+        <div class="preview-title">
+          <span>SOURCE VIDEO PLAYER</span>
+          <span id="videoSourceInfo" style="color:var(--cyan);">NONE</span>
+        </div>
+        <div class="canvas-frame">
+          <video id="videoPlayer" playsinline loop muted controls></video>
+        </div>
+      </div>
+
+      <!-- BOX 2: HARDWARE SCREEN SIMULATOR -->
+      <div class="preview-box">
+        <div class="preview-title">
+          <span>ESP32 DISPLAY SIMULATOR</span>
+          <span id="displayResBadge" style="color:var(--emerald);">240x240 IPS</span>
+        </div>
+        <div class="canvas-frame">
+          <canvas id="streamCanvas" width="240" height="240"></canvas>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- STREAMING CONTROLS & CONFIGURATION -->
+    <div class="card">
+      
+      <div class="controls-grid">
+        
+        <!-- TARGET DISPLAY -->
+        <div class="control-item">
+          <label class="control-label">TARGET DISPLAY</label>
+          <select id="selDisplay" class="select-field" onchange="updateDisplayMode()">
+            <option value="st7789-native">ST7789 240x240 IPS (Full)</option>
+            <option value="st7789-hud">ST7789 240x240 (Centered HUD)</option>
+            <option value="ssd1306">SSD1306 128x64 OLED</option>
+          </select>
+        </div>
+
+        <!-- DITHER / ALGORITHM -->
+        <div class="control-item">
+          <label class="control-label">RENDER MODE</label>
+          <select id="selMode" class="select-field">
+            <option value="dither">Floyd-Steinberg Dither</option>
+            <option value="threshold">Binary Threshold</option>
+          </select>
+        </div>
+
+        <!-- ASPECT RATIO FIT -->
+        <div class="control-item">
+          <label class="control-label">ASPECT FIT</label>
+          <select id="selFit" class="select-field">
+            <option value="crop">Crop (Fill Screen)</option>
+            <option value="letterbox">Letterbox (Fit Whole)</option>
+          </select>
+        </div>
+
+        <!-- FRAME RATE (FPS) -->
+        <div class="control-item">
+          <label class="control-label">FRAME RATE (<span id="fpsDisplay">15</span> FPS)</label>
+          <input type="range" id="fpsSlider" min="5" max="30" value="15" step="1" oninput="document.getElementById('fpsDisplay').innerText = this.value" style="margin-top:6px; accent-color:var(--cyan);">
+        </div>
+
+      </div>
+
+      <!-- TELEMETRY ROW -->
+      <div class="telemetry-row">
+        <div class="stat-pod">
+          <span class="stat-label">STREAM FPS</span>
+          <span class="stat-value" id="hudActualFps">0.0</span>
+        </div>
+        <div class="stat-pod">
+          <span class="stat-label">FRAMES SENT</span>
+          <span class="stat-value" id="hudFramesSent">0</span>
+        </div>
+        <div class="stat-pod">
+          <span class="stat-label">BANDWIDTH</span>
+          <span class="stat-value" id="hudBitrate">0 KB/s</span>
+        </div>
+        <div class="stat-pod">
+          <span class="stat-label">LATENCY</span>
+          <span class="stat-value" id="hudLatency">-- ms</span>
+        </div>
+      </div>
+
+      <!-- ACTION BUTTONS -->
+      <div style="display:flex; gap:10px;">
+        <button class="btn-primary" id="btnPlayStream" style="flex:1; padding:12px;" onclick="toggleStreaming()">
+          ▶ START STREAMING
+        </button>
+      </div>
+
+    </div>
+
+  </div>
+
+  <!-- WI-FI CONFIGURATION MODAL -->
+  <div class="modal-backdrop" id="wifiModal" onclick="closeWifiModal(event)">
+    <div class="modal-card" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div style="font-weight:800; font-size:0.85rem; color:var(--text);">⚙️ ESP32 WI-FI CONFIGURATION</div>
+        <button class="btn-tool" onclick="closeWifiModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p style="font-size:0.75rem; color:var(--text-muted); line-height:1.4;">
+          Connect your ESP32-C3 to your home/mobile hotspot so it joins your local network. Credentials are saved in flash memory.
+        </p>
+        
+        <div class="control-item">
+          <label class="control-label">WI-FI NETWORK (SSID)</label>
+          <div style="display:flex; gap:6px;">
+            <input type="text" id="wifiSsidInput" class="input-field" style="background:var(--bg); border:1px solid var(--border); border-radius:6px;" placeholder="Network name">
+            <button class="btn-tool" onclick="scanWifiNetworks()">🔄 SCAN</button>
+          </div>
+        </div>
+
+        <div id="wifiScanList" style="display:flex; flex-direction:column; gap:6px; max-height:120px; overflow-y:auto;">
+          <!-- Scanned Wi-Fi list inserted here -->
+        </div>
+
+        <div class="control-item">
+          <label class="control-label">WI-FI PASSWORD</label>
+          <input type="password" id="wifiPassInput" class="input-field" style="background:var(--bg); border:1px solid var(--border); border-radius:6px;" placeholder="Wi-Fi Password">
+        </div>
+
+        <div style="display:flex; gap:8px; margin-top:8px;">
+          <button class="btn-primary" style="flex:1;" onclick="submitWifiCredentials()">SAVE & RECONNECT</button>
+          <button class="btn-danger" onclick="resetWifiCredentials()">RESET TO AP</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- JAVASCRIPT LOGIC ENGINE -->
+  <script>
+    // System State
+    let socket = null;
+    let isConnected = false;
+    let isStreaming = false;
+    let streamInterval = null;
+    let cameraStream = null;
+
+    // Telemetry
+    let frameCount = 0;
+    let bytesSent = 0;
+    let lastStatsTime = performance.now();
+    let lastFrameSentTime = 0;
+
+    // Elements
+    const video = document.getElementById('videoPlayer');
+    const canvas = document.getElementById('streamCanvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const ipInput = document.getElementById('espIpInput');
+    const statusBadge = document.getElementById('statusBadge');
+    const statusText = document.getElementById('statusText');
+    const btnConnect = document.getElementById('btnConnect');
+    const btnPlayStream = document.getElementById('btnPlayStream');
+
+    // Auto-detect host: if loaded directly from ESP32 (e.g. 192.168.4.1), use that host!
+    window.addEventListener('load', () => {
+      const host = window.location.hostname;
+      if (host && host !== 'localhost' && host !== '127.0.0.1' && !host.includes('github.io')) {
+        ipInput.value = host;
+      } else {
+        const savedIp = localStorage.getItem('esp32_streamer_ip');
+        ipInput.value = savedIp || '192.168.4.1';
+      }
+    });
+
+    // -------------------------------------------------------------
+    // WEBSOCKET LINK ENGINE
+    // -------------------------------------------------------------
+    function toggleConnection() {
+      if (isConnected) {
+        disconnectSocket();
+      } else {
+        connectSocket();
+      }
+    }
+
+    function connectSocket() {
+      const ip = ipInput.value.trim();
+      if (!ip) {
+        alert("Please enter your ESP32 IP address (e.g., 192.168.4.1 or your home IP)");
+        return;
+      }
+      localStorage.setItem('esp32_streamer_ip', ip);
+
+      statusBadge.className = "status-badge badge-connecting";
+      statusText.innerText = "CONNECTING...";
+      btnConnect.innerText = "CONNECTING...";
+
+      try {
+        const wsUrl = `ws://${ip}:81/`;
+        console.log(`Connecting to WebSocket: ${wsUrl}`);
+        socket = new WebSocket(wsUrl);
+        socket.binaryType = "arraybuffer";
+
+        socket.onopen = () => {
+          console.log("WebSocket connected successfully!");
+          isConnected = true;
+          statusBadge.className = "status-badge badge-online";
+          statusText.innerText = "CONNECTED";
+          btnConnect.innerText = "DISCONNECT";
+          btnConnect.className = "btn-danger";
+        };
+
+        socket.onclose = () => {
+          console.log("WebSocket disconnected.");
+          disconnectSocket();
+        };
+
+        socket.onerror = (err) => {
+          console.warn("WebSocket error:", err);
+          disconnectSocket();
+        };
+
+      } catch (err) {
+        console.error("Connection failed:", err);
+        disconnectSocket();
+      }
+    }
+
+    function disconnectSocket() {
+      if (isStreaming) toggleStreaming();
+      if (socket) {
+        try { socket.close(); } catch (e) {}
+      }
+      socket = null;
+      isConnected = false;
+      statusBadge.className = "status-badge badge-offline";
+      statusText.innerText = "DISCONNECTED";
+      btnConnect.innerText = "CONNECT";
+      btnConnect.className = "btn-primary";
+    }
+
+    // -------------------------------------------------------------
+    // VIDEO FILE & CAMERA SELECTION
+    // -------------------------------------------------------------
+    function handleFileSelect(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      if (cameraStream) stopCamera();
+
+      const url = URL.createObjectURL(file);
+      video.src = url;
+      video.load();
+      video.play().catch(() => {});
+      document.getElementById('videoSourceInfo').innerText = file.name.substring(0, 18);
+    }
+
+    async function toggleCamera() {
+      if (cameraStream) {
+        stopCamera();
+      } else {
+        try {
+          cameraStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 480 }, height: { ideal: 480 } },
+            audio: false
+          });
+          video.srcObject = cameraStream;
+          video.play();
+          document.getElementById('videoSourceInfo').innerText = "LIVE CAMERA";
+          document.getElementById('btnCamera').style.borderColor = "var(--emerald)";
+          document.getElementById('btnCamera').style.color = "var(--emerald)";
+        } catch (err) {
+          alert("Camera access failed: " + err.message);
+        }
+      }
+    }
+
+    function stopCamera() {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(t => t.stop());
+        cameraStream = null;
+      }
+      video.srcObject = null;
+      document.getElementById('btnCamera').style.borderColor = "var(--border)";
+      document.getElementById('btnCamera').style.color = "var(--text)";
+    }
+
+    // -------------------------------------------------------------
+    // DISPLAY CONFIGURATION
+    // -------------------------------------------------------------
+    function updateDisplayMode() {
+      const disp = document.getElementById('selDisplay').value;
+      if (disp === 'ssd1306') {
+        canvas.width = 128;
+        canvas.height = 64;
+        document.getElementById('displayResBadge').innerText = "128x64 OLED";
+      } else {
+        canvas.width = 240;
+        canvas.height = 240;
+        document.getElementById('displayResBadge').innerText = "240x240 IPS";
+      }
+    }
+
+    // -------------------------------------------------------------
+    // REAL-TIME STREAMING & DITHERING ENGINE
+    // -------------------------------------------------------------
+    function toggleStreaming() {
+      if (isStreaming) {
+        isStreaming = false;
+        clearInterval(streamInterval);
+        btnPlayStream.innerText = "▶ START STREAMING";
+        btnPlayStream.className = "btn-primary";
+        video.pause();
+      } else {
+        if (!isConnected) {
+          alert("Please connect to your ESP32 first via WebSocket!");
+          return;
+        }
+        if (!video.videoWidth && !video.srcObject) {
+          alert("Please select a video file or start camera first!");
+          return;
+        }
+        isStreaming = true;
+        btnPlayStream.innerText = "⏹ STOP STREAMING";
+        btnPlayStream.className = "btn-danger";
+        video.play().catch(() => {});
+
+        const fps = parseInt(document.getElementById('fpsSlider').value) || 15;
+        const intervalMs = Math.round(1000 / fps);
+        streamInterval = setInterval(processAndSendFrame, intervalMs);
+      }
+    }
+
+    function processAndSendFrame() {
+      if (!isStreaming || !video.videoWidth) return;
+
+      const targetDisp = document.getElementById('selDisplay').value;
+      const mode = document.getElementById('selMode').value;
+      const fit = document.getElementById('selFit').value;
+
+      // Determine dimensions
+      const targetW = (targetDisp === 'ssd1306' || targetDisp === 'st7789-hud') ? 128 : 240;
+      const targetH = (targetDisp === 'ssd1306' || targetDisp === 'st7789-hud') ? 64 : 240;
+
+      // Draw video frame to canvas with aspect ratio handling
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      const vw = video.videoWidth;
+      const vh = video.videoHeight;
+
+      if (fit === 'crop') {
+        // Crop center
+        const scale = Math.max(targetW / vw, targetH / vh);
+        const sw = targetW / scale;
+        const sh = targetH / scale;
+        const sx = (vw - sw) / 2;
+        const sy = (vh - sh) / 2;
+        ctx.drawImage(video, sx, sy, sw, sh, 0, 0, targetW, targetH);
+      } else {
+        // Letterbox contain
+        const scale = Math.min(targetW / vw, targetH / vh);
+        const dw = vw * scale;
+        const dh = vh * scale;
+        const dx = (targetW - dw) / 2;
+        const dy = (targetH - dh) / 2;
+        ctx.drawImage(video, 0, 0, vw, vh, dx, dy, dw, dh);
+      }
+
+      // Extract pixel data & apply dithering
+      const imgData = ctx.getImageData(0, 0, targetW, targetH);
+      const binaryMap = (mode === 'dither') ? ditherFloydSteinberg(imgData, targetW, targetH) : thresholdBinary(imgData, targetW, targetH);
+
+      // Re-draw processed binary pixels onto canvas for preview
+      for (let i = 0; i < targetW * targetH; i++) {
+        const val = binaryMap[i] ? 255 : 0;
+        const idx = i * 4;
+        imgData.data[idx]     = (targetDisp === 'st7789-native' && val) ? 0 : val;   // R
+        imgData.data[idx + 1] = (targetDisp === 'st7789-native' && val) ? 240 : val; // G (Cyber green/cyan)
+        imgData.data[idx + 2] = (targetDisp === 'st7789-native' && val) ? 255 : val; // B
+        imgData.data[idx + 3] = 255;
+      }
+      ctx.putImageData(imgData, 0, 0);
+
+      // Pack & transmit binary frame
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        if (targetDisp === 'ssd1306' || targetDisp === 'st7789-hud') {
+          // VID0 Protocol: 4 bytes header + 1024 bytes SSD1306 page bit-packed
+          const packet = new Uint8Array(4 + 1024);
+          packet[0] = 0x56; packet[1] = 0x49; packet[2] = 0x44; packet[3] = 0x30; // 'VID0'
+          for (let p = 0; p < 8; p++) {
+            const pageOffset = p * 128;
+            for (let x = 0; x < 128; x++) {
+              let b = 0;
+              for (let bit = 0; bit < 8; bit++) {
+                const y = p * 8 + bit;
+                if (binaryMap[y * 128 + x]) {
+                  b |= (1 << bit);
+                }
+              }
+              packet[4 + pageOffset + x] = b;
+            }
+          }
+          socket.send(packet.buffer);
+          bytesSent += packet.byteLength;
+          frameCount++;
+        } else {
+          // V240 Native Protocol: 6 chunks of 40 lines (1200 bytes each)
+          const seq = frameCount & 0xFFFF;
+          const seqHigh = (seq >> 8) & 0xFF;
+          const seqLow  = seq & 0xFF;
+
+          for (let chunkIdx = 0; chunkIdx < 6; chunkIdx++) {
+            // Header: 'V240' (4B) + chunkIdx (1B) + totalChunks (1B) + seq (2B) + data (1200B) = 1208B
+            const chunkPacket = new Uint8Array(8 + 1200);
+            chunkPacket[0] = 0x56; chunkPacket[1] = 0x32; chunkPacket[2] = 0x34; chunkPacket[3] = 0x30; // 'V240'
+            chunkPacket[4] = chunkIdx;
+            chunkPacket[5] = 6;
+            chunkPacket[6] = seqHigh;
+            chunkPacket[7] = seqLow;
+
+            const startY = chunkIdx * 40;
+            for (let y = 0; y < 40; y++) {
+              const rowY = startY + y;
+              const rowByteOffset = 8 + (y * 30);
+              for (let bx = 0; bx < 30; bx++) {
+                let byteVal = 0;
+                const startX = bx * 8;
+                for (let bit = 0; bit < 8; bit++) {
+                  if (binaryMap[rowY * 240 + (startX + bit)]) {
+                    byteVal |= (0x80 >> bit);
+                  }
+                }
+                chunkPacket[rowByteOffset + bx] = byteVal;
+              }
+            }
+            socket.send(chunkPacket.buffer);
+            bytesSent += chunkPacket.byteLength;
+          }
+          frameCount++;
+        }
+      }
+
+      updateTelemetry();
+    }
+
+    // -------------------------------------------------------------
+    // DITHERING ALGORITHMS
+    // -------------------------------------------------------------
+    function ditherFloydSteinberg(imageData, width, height) {
+      const data = imageData.data;
+      const gray = new Float32Array(width * height);
+      for (let i = 0; i < width * height; i++) {
+        const idx = i * 4;
+        gray[i] = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+      }
+
+      const output = new Uint8Array(width * height);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = y * width + x;
+          const oldVal = gray[i];
+          const newVal = oldVal < 128 ? 0 : 255;
+          output[i] = newVal ? 1 : 0;
+          const err = oldVal - newVal;
+
+          if (x + 1 < width) gray[i + 1] += err * (7 / 16);
+          if (y + 1 < height) {
+            if (x > 0) gray[i + width - 1] += err * (3 / 16);
+            gray[i + width] += err * (5 / 16);
+            if (x + 1 < width) gray[i + width + 1] += err * (1 / 16);
+          }
+        }
+      }
+      return output;
+    }
+
+    function thresholdBinary(imageData, width, height) {
+      const data = imageData.data;
+      const output = new Uint8Array(width * height);
+      for (let i = 0; i < width * height; i++) {
+        const idx = i * 4;
+        const g = 0.299 * data[idx] + 0.587 * data[idx + 1] + 0.114 * data[idx + 2];
+        output[i] = (g >= 128) ? 1 : 0;
+      }
+      return output;
+    }
+
+    // -------------------------------------------------------------
+    // TELEMETRY
+    // -------------------------------------------------------------
+    function updateTelemetry() {
+      const now = performance.now();
+      const elapsedSec = (now - lastStatsTime) / 1000.0;
+      if (elapsedSec >= 0.8) {
+        const fps = (frameCount / elapsedSec).toFixed(1);
+        const kbps = (bytesSent / 1024 / elapsedSec).toFixed(1);
+        document.getElementById('hudActualFps').innerText = fps;
+        document.getElementById('hudFramesSent').innerText = frameCount;
+        document.getElementById('hudBitrate').innerText = `${kbps} KB/s`;
+
+        frameCount = 0;
+        bytesSent = 0;
+        lastStatsTime = now;
+      }
+    }
+
+    // -------------------------------------------------------------
+    // WI-FI CONFIG MODAL
+    // -------------------------------------------------------------
+    function openWifiModal() {
+      document.getElementById('wifiModal').classList.add('active');
+    }
+
+    function closeWifiModal(e) {
+      if (e && e.target && e.target !== e.currentTarget && !e.target.classList.contains('btn-tool')) return;
+      document.getElementById('wifiModal').classList.remove('active');
+    }
+
+    async function scanWifiNetworks() {
+      const ip = ipInput.value.trim() || '192.168.4.1';
+      const listEl = document.getElementById('wifiScanList');
+      listEl.innerHTML = "<div style='font-size:0.75rem; color:var(--text-muted);'>Scanning networks...</div>";
+      try {
+        const resp = await fetch(`http://${ip}/scan`, { signal: AbortSignal.timeout(6000) });
+        const networks = await resp.json();
+        listEl.innerHTML = "";
+        networks.forEach(net => {
+          const div = document.createElement('div');
+          div.className = "wifi-item";
+          div.innerHTML = `<span style="font-weight:700; font-size:0.8rem;">${net.ssid}</span><span style="color:var(--text-dim); font-size:0.72rem;">${net.rssi} dBm</span>`;
+          div.onclick = () => { document.getElementById('wifiSsidInput').value = net.ssid; };
+          listEl.appendChild(div);
+        });
+      } catch (err) {
+        listEl.innerHTML = `<div style="font-size:0.75rem; color:var(--crimson);">Scan failed: ${err.message}. Make sure you are connected to the ESP32 network!</div>`;
+      }
+    }
+
+    async function submitWifiCredentials() {
+      const ip = ipInput.value.trim() || '192.168.4.1';
+      const ssid = document.getElementById('wifiSsidInput').value.trim();
+      const pass = document.getElementById('wifiPassInput').value;
+      if (!ssid) {
+        alert("Please enter a Wi-Fi SSID!");
+        return;
+      }
+      try {
+        const formData = new FormData();
+        formData.append('ssid', ssid);
+        formData.append('pass', pass);
+        const resp = await fetch(`http://${ip}/save-wifi`, { method: 'POST', body: formData });
+        alert("Credentials saved! ESP32 is now connecting to your Wi-Fi...");
+        closeWifiModal();
+      } catch (err) {
+        alert("Save request sent! ESP32 will reboot and connect to " + ssid);
+        closeWifiModal();
+      }
+    }
+
+    async function resetWifiCredentials() {
+      if (!confirm("Reset ESP32 to factory Hotspot mode?")) return;
+      const ip = ipInput.value.trim() || '192.168.4.1';
+      try {
+        await fetch(`http://${ip}/reset-wifi`, { method: 'POST' });
+      } catch (e) {}
+      alert("ESP32 Wi-Fi reset! It will restart as hotspot 'ESP32-C3-Streamer'.");
+      closeWifiModal();
+    }
+  </script>
+</body>
+</html>

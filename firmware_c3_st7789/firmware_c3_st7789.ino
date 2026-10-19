@@ -1,76 +1,109 @@
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include <WebServer.h>
+#include <Preferences.h>
+#include "mbedtls/sha1.h"
+#include "mbedtls/base64.h"
 #include "display_setup.h"
+#include "web_streamer_html.h"
 
 // =========================================================================
-// WI-FI & UDP STREAMING CONFIGURATION
+// SYSTEM CONSTANTS & NETWORK CONFIGURATION
 // =========================================================================
-const char* WIFI_SSID     = "YOUR_WIFI_NAME";
-const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 constexpr uint16_t UDP_PORT = 4210;
+constexpr uint16_t WS_PORT  = 81;
+constexpr uint16_t HTTP_PORT = 80;
 
-// Protocols supported:
-// 1. "VID0" : 128x64 monochrome frame (1024 bytes SSD1306 format) -> 1028 bytes UDP
-// 2. "V240" : 240x240 native high-res chunks (40 lines = 1200 bytes per chunk)
 constexpr size_t VID0_PAYLOAD = 1024;
 constexpr size_t VID0_PACKET  = 4 + VID0_PAYLOAD;
 
+const char* AP_SSID = "ESP32-C3-Streamer";
+const char* AP_PASS = ""; // Open Hotspot for 1-tap phone connection
+
+// Hardware Instances
 LGFX_ST7789 tft;
 LGFX_Sprite videoSprite(&tft);
 WiFiUDP udp;
+WebServer server(HTTP_PORT);
+WiFiServer wsServer(WS_PORT);
+WiFiClient wsClient;
+Preferences prefs;
 
-uint8_t rxPacket[1500];
+// State Variables
+bool isApMode = false;
+bool wsHandshakeDone = false;
+bool inStreamMode = false;
+unsigned long lastFrameArrival = 0;
 unsigned long frameCount = 0;
 unsigned long lastFpsTime = 0;
 float currentFps = 0.0f;
-bool inStreamMode = false;
-unsigned long lastFrameArrival = 0;
 
-// Color theme for video playback:
-// 0: Crisp White, 1: Cyberpunk Cyan, 2: Matrix Green, 3: Retro Amber
 uint8_t colorTheme = 0;
 const uint16_t THEME_COLORS[] = { TFT_WHITE, 0x07FF, 0x07E0, 0xFBE0 };
-const char* THEME_NAMES[] = { "CRISP WHITE", "CYBER CYAN", "MATRIX GREEN", "RETRO AMBER" };
 
+// Buffers
+uint8_t rxPacket[1500];
+uint8_t wsBuffer[2048];
+
+// =========================================================================
+// WEBSOCKET RFC 6455 HANDSHAKE (ZERO-DEPENDENCY MBEDTLS)
+// =========================================================================
+String computeWebSocketAccept(const String& key) {
+    String combined = key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+    unsigned char hash[20];
+    mbedtls_sha1((const unsigned char*)combined.c_str(), combined.length(), hash);
+    unsigned char b64[36];
+    size_t outLen = 0;
+    mbedtls_base64_encode(b64, sizeof(b64), &outLen, hash, 20);
+    b64[outLen] = '\0';
+    return String((char*)b64);
+}
+
+// =========================================================================
+// DISPLAY RENDERING ROUTINES
+// =========================================================================
 void drawWaitingScreen() {
     tft.fillScreen(TFT_BLACK);
     
-    // Top Cyber Header
-    tft.fillRect(0, 0, 240, 28, 0x18E3);
-    tft.drawFastHLine(0, 28, 240, 0x07FF);
-    tft.setTextColor(0x07FF);
+    // Header
+    tft.fillRect(0, 0, 240, 30, isApMode ? 0x7380 : 0x0186);
+    tft.drawFastHLine(0, 30, 240, isApMode ? 0xFBE0 : 0x07FF);
+    tft.setTextColor(isApMode ? 0xFBE0 : 0x07FF);
     tft.setTextSize(1);
-    tft.drawCenterString("ESP32-C3 // VIDEO STREAMER", 120, 8);
+    tft.drawCenterString(isApMode ? "HOTSPOT AP ACTIVE" : "WI-FI STATION CONNECTED", 120, 10);
     
-    // Status Box
-    tft.drawRect(15, 45, 210, 145, 0x3186);
-    tft.drawRect(17, 47, 206, 141, 0x2124);
+    // Status Card Box
+    tft.drawRect(12, 42, 216, 150, 0x3186);
+    tft.drawRect(14, 44, 212, 146, 0x2124);
     
     tft.setTextColor(TFT_WHITE);
     tft.setTextSize(2);
-    tft.drawCenterString("WAITING FOR", 120, 65);
-    tft.drawCenterString("VIDEO STREAM", 120, 88);
+    tft.drawCenterString("WAITING FOR", 120, 60);
+    tft.drawCenterString("VIDEO STREAM", 120, 82);
     
     tft.setTextSize(1);
-    tft.setTextColor(0x07E0); // Green
-    tft.drawCenterString(String("IP: ") + WiFi.localIP().toString(), 120, 120);
+    if (isApMode) {
+        tft.setTextColor(0xFBE0);
+        tft.drawCenterString(String("Wi-Fi: ") + AP_SSID, 120, 114);
+        tft.setTextColor(0x07E0);
+        tft.drawCenterString("Open: http://192.168.4.1", 120, 134);
+    } else {
+        tft.setTextColor(0x07E0);
+        tft.drawCenterString(String("IP: ") + WiFi.localIP().toString(), 120, 114);
+        tft.setTextColor(0x07FF);
+        tft.drawCenterString(String("Web: http://") + WiFi.localIP().toString(), 120, 134);
+    }
     
-    tft.setTextColor(0xFBE0); // Amber
-    tft.drawCenterString(String("PORT: ") + String(UDP_PORT), 120, 140);
-    
-    int rssi = WiFi.RSSI();
     tft.setTextColor(0x7BEF);
-    tft.drawCenterString(String("Wi-Fi Signal: ") + String(rssi) + " dBm", 120, 160);
+    tft.drawCenterString(String("WS: ") + String(WS_PORT) + " | UDP: " + String(UDP_PORT), 120, 158);
     
     // Footer Guide
-    tft.drawFastHLine(0, 212, 240, 0x2124);
+    tft.drawFastHLine(0, 210, 240, 0x2124);
     tft.setTextColor(0x7BEF);
-    tft.setTextSize(1);
-    tft.drawCenterString("Run: py streamer.py video.mp4", 120, 222);
+    tft.drawCenterString("Stream via Phone/PC Browser or EXE", 120, 222);
 }
 
 void drawStreamHud() {
-    // Top HUD Bar (y: 0..50)
     tft.fillRect(0, 0, 240, 56, TFT_BLACK);
     tft.drawFastHLine(0, 56, 240, 0x07FF);
     
@@ -79,7 +112,7 @@ void drawStreamHud() {
     tft.drawString("ESP32-C3 STREAM", 8, 8);
     
     tft.setTextColor(TFT_WHITE);
-    tft.drawRightString(WiFi.localIP().toString(), 232, 8);
+    tft.drawRightString(isApMode ? "192.168.4.1" : WiFi.localIP().toString(), 232, 8);
     
     char statBuf[48];
     snprintf(statBuf, sizeof(statBuf), "FPS: %.1f  |  FRAMES: %lu", currentFps, frameCount);
@@ -87,25 +120,19 @@ void drawStreamHud() {
     tft.drawString(statBuf, 8, 26);
     
     tft.setTextColor(0x7BEF);
-    tft.drawRightString(String("UDP:") + String(UDP_PORT), 232, 26);
+    tft.drawRightString(String("PORT: ") + String(WS_PORT) + "/" + String(UDP_PORT), 232, 26);
 
-    // Bottom HUD Bar (y: 184..240)
     tft.fillRect(0, 184, 240, 56, TFT_BLACK);
     tft.drawFastHLine(0, 184, 240, 0x07FF);
     
     tft.setTextColor(0xFBE0);
-    tft.setTextSize(1);
-    tft.drawCenterString("ST7789 240x240 IPS // FLOYD-STEINBERG DITHER", 120, 196);
-    
+    tft.drawCenterString("ST7789 240x240 IPS // WIRELESS VIDEO", 120, 196);
     tft.setTextColor(0x7BEF);
-    tft.drawCenterString("Press button on GPIO 4/Touch to cycle color palette", 120, 216);
+    tft.drawCenterString("Hardware SPI DMA @ 40MHz", 120, 216);
 }
 
 void renderVid0Frame(const uint8_t* raw) {
     uint16_t onColor = THEME_COLORS[colorTheme];
-    
-    // Unpack 128x64 SSD1306 page bit-packed buffer into videoSprite
-    // 8 pages tall, 128 pixels wide. Each byte represents 8 vertical pixels.
     videoSprite.startWrite();
     for (int p = 0; p < 8; p++) {
         int baseY = p * 8;
@@ -119,24 +146,17 @@ void renderVid0Frame(const uint8_t* raw) {
         }
     }
     videoSprite.endWrite();
-
-    // Scale 128x64 sprite to 240x120 centered at (120, 120) on 240x240 screen
-    // 128 * 1.875 = 240px wide; 64 * 1.875 = 120px tall
     videoSprite.pushRotateZoom(120, 120, 0.0f, 1.875f, 1.875f);
 }
 
 void renderV240Chunk(const uint8_t* chunkHeader, const uint8_t* data, size_t len) {
-    uint8_t chunkIdx   = chunkHeader[0];
-    uint8_t totalChunks = chunkHeader[1];
+    uint8_t chunkIdx = chunkHeader[0];
     if (chunkIdx >= 6) return;
-    
     int startY = chunkIdx * 40;
     uint16_t onColor = THEME_COLORS[colorTheme];
-    
     tft.startWrite();
-    // 40 rows, 240 pixels per row = 9600 pixels = 1200 bytes (8 pixels per byte, MSB first)
     for (int y = 0; y < 40; y++) {
-        int rowOffset = y * 30; // 240 / 8 = 30 bytes per line
+        int rowOffset = y * 30;
         int screenY = startY + y;
         for (int bx = 0; bx < 30; bx++) {
             uint8_t b = data[rowOffset + bx];
@@ -150,115 +170,285 @@ void renderV240Chunk(const uint8_t* chunkHeader, const uint8_t* data, size_t len
     tft.endWrite();
 }
 
+// =========================================================================
+// WEBSOCKET DATA FRAME PROCESSOR
+// =========================================================================
+void processRawVideoPayload(const uint8_t* data, size_t len) {
+    if (len >= 4 && memcmp(data, "VID0", 4) == 0 && len >= VID0_PACKET) {
+        if (!inStreamMode) {
+            inStreamMode = true;
+            tft.fillScreen(TFT_BLACK);
+            drawStreamHud();
+        }
+        renderVid0Frame(data + 4);
+        frameCount++;
+        lastFrameArrival = millis();
+    } else if (len >= 8 && memcmp(data, "V240", 4) == 0 && len >= 1208) {
+        if (!inStreamMode) {
+            inStreamMode = true;
+            tft.fillScreen(TFT_BLACK);
+        }
+        renderV240Chunk(data + 4, data + 8, len - 8);
+        if (data[4] == 0) frameCount++;
+        lastFrameArrival = millis();
+    }
+}
+
+void handleWebSocketClient() {
+    if (wsServer.hasClient()) {
+        if (wsClient && wsClient.connected()) wsClient.stop();
+        wsClient = wsServer.available();
+        wsHandshakeDone = false;
+        Serial.println("[WS] New client connected!");
+    }
+
+    if (!wsClient || !wsClient.connected()) return;
+
+    if (!wsHandshakeDone) {
+        // Read HTTP upgrade request
+        String req = "";
+        while (wsClient.available()) {
+            req += (char)wsClient.read();
+            if (req.endsWith("\r\n\r\n")) break;
+        }
+
+        if (req.indexOf("Upgrade: websocket") != -1) {
+            int keyIndex = req.indexOf("Sec-WebSocket-Key: ");
+            if (keyIndex != -1) {
+                int keyEnd = req.indexOf("\r\n", keyIndex);
+                String key = req.substring(keyIndex + 19, keyEnd);
+                key.trim();
+                String acceptKey = computeWebSocketAccept(key);
+
+                String response = "HTTP/1.1 101 Switching Protocols\r\n"
+                                  "Upgrade: websocket\r\n"
+                                  "Connection: Upgrade\r\n"
+                                  "Sec-WebSocket-Accept: " + acceptKey + "\r\n\r\n";
+                wsClient.print(response);
+                wsHandshakeDone = true;
+                Serial.println("[WS] Handshake established successfully!");
+            }
+        }
+        return;
+    }
+
+    // Process RFC 6455 Binary Frames
+    while (wsClient.available() >= 2) {
+        uint8_t b0 = wsClient.read();
+        uint8_t b1 = wsClient.read();
+        uint8_t opcode = b0 & 0x0F;
+        bool isMasked = (b1 & 0x80) != 0;
+        size_t payloadLen = b1 & 0x7F;
+
+        if (opcode == 0x08) { // Connection Close
+            wsClient.stop();
+            wsHandshakeDone = false;
+            return;
+        }
+
+        if (payloadLen == 126) {
+            while (wsClient.available() < 2) delay(1);
+            payloadLen = ((size_t)wsClient.read() << 8) | wsClient.read();
+        } else if (payloadLen == 127) {
+            for (int i = 0; i < 8; i++) wsClient.read();
+            return;
+        }
+
+        uint8_t mask[4] = {0, 0, 0, 0};
+        if (isMasked) {
+            while (wsClient.available() < 4) delay(1);
+            wsClient.read(mask, 4);
+        }
+
+        if (payloadLen > sizeof(wsBuffer)) {
+            // Drain oversized frame
+            size_t drained = 0;
+            while (drained < payloadLen && wsClient.available()) {
+                wsClient.read();
+                drained++;
+            }
+            return;
+        }
+
+        size_t bytesRead = 0;
+        while (bytesRead < payloadLen) {
+            if (wsClient.available()) {
+                wsBuffer[bytesRead++] = wsClient.read();
+            } else {
+                delay(1);
+            }
+        }
+
+        if (isMasked) {
+            for (size_t i = 0; i < payloadLen; i++) {
+                wsBuffer[i] ^= mask[i % 4];
+            }
+        }
+
+        // Forward unmasked payload to video render pipeline
+        processRawVideoPayload(wsBuffer, payloadLen);
+    }
+}
+
+// =========================================================================
+// HTTP WEBSERVER ROUTES (SCAN, SAVE, RESET, STATUS, WEB DECK)
+// =========================================================================
+void setupWebServerRoutes() {
+    // Serve main HTML5 video deck
+    server.on("/", HTTP_GET, []() {
+        server.send_P(200, "text/html", INDEX_HTML);
+    });
+
+    // Wi-Fi network scanner
+    server.on("/scan", HTTP_GET, []() {
+        int n = WiFi.scanNetworks();
+        String json = "[";
+        for (int i = 0; i < n; ++i) {
+            if (i > 0) json += ",";
+            json += "{\"ssid\":\"" + WiFi.SSID(i) + "\",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+        }
+        json += "]";
+        server.send(200, "application/json", json);
+    });
+
+    // Save credentials & restart
+    server.on("/save-wifi", HTTP_POST, []() {
+        String ssid = server.arg("ssid");
+        String pass = server.arg("pass");
+        if (ssid.length() > 0) {
+            prefs.putString("ssid", ssid);
+            prefs.putString("pass", pass);
+            server.send(200, "text/plain", "OK");
+            delay(800);
+            ESP.restart();
+        } else {
+            server.send(400, "text/plain", "SSID cannot be empty");
+        }
+    });
+
+    // Reset to AP Hotspot mode
+    server.on("/reset-wifi", HTTP_POST, []() {
+        prefs.remove("ssid");
+        prefs.remove("pass");
+        server.send(200, "text/plain", "RESET_OK");
+        delay(800);
+        ESP.restart();
+    });
+
+    // System status
+    server.on("/status", HTTP_GET, []() {
+        String json = "{\"ap\":";
+        json += isApMode ? "true" : "false";
+        json += ",\"ip\":\"" + (isApMode ? String("192.168.4.1") : WiFi.localIP().toString()) + "\"";
+        json += ",\"fps\":" + String(currentFps, 1);
+        json += ",\"frames\":" + String(frameCount);
+        json += "}";
+        server.send(200, "application/json", json);
+    });
+
+    server.begin();
+    Serial.println("[HTTP] Web Server started on port 80");
+}
+
+// =========================================================================
+// SETUP & SYSTEM INITIALIZATION
+// =========================================================================
 void setup() {
     Serial.begin(115200);
     delay(200);
     Serial.println("\n==============================================");
-    Serial.println("  ESP32-C3 ST7789 IPS VIDEO RECEIVER (UDP)    ");
+    Serial.println("  ESP32-C3 ST7789 VIDEO STREAMER (WEB & UDP)  ");
     Serial.println("==============================================");
 
-    // Initialize ST7789 Display via LovyanGFX
+    // Init Display
     tft.init();
     tft.setRotation(0);
     tft.setBrightness(255);
     tft.fillScreen(TFT_BLACK);
 
-    // Create 128x64 16-bit sprite for smooth video upscaling
     videoSprite.setColorDepth(16);
     videoSprite.createSprite(128, 64);
 
-    // Initial boot message
-    tft.setTextColor(0x07FF);
-    tft.setTextSize(1);
-    tft.drawCenterString("CONNECTING TO WI-FI...", 120, 100);
-    tft.setTextColor(0x7BEF);
-    tft.drawCenterString(WIFI_SSID, 120, 120);
+    // Read stored Wi-Fi credentials from NVS Flash
+    prefs.begin("stream_wifi", false);
+    String savedSsid = prefs.getString("ssid", "");
+    String savedPass = prefs.getString("pass", "");
 
-    // Wi-Fi Connection
-    WiFi.mode(WIFI_STA);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-
-    unsigned long startMs = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - startMs < 20000) {
-        delay(300);
-        Serial.print('.');
-    }
-    Serial.println();
-
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[ERROR] Wi-Fi connection failed!");
-        tft.fillScreen(TFT_BLACK);
-        tft.setTextColor(TFT_RED);
-        tft.setTextSize(2);
-        tft.drawCenterString("WI-FI FAILED", 120, 90);
+    bool connected = false;
+    if (savedSsid.length() > 0) {
+        Serial.printf("[WI-FI] Connecting to saved network: %s\n", savedSsid.c_str());
+        tft.setTextColor(0x07FF);
         tft.setTextSize(1);
-        tft.setTextColor(TFT_WHITE);
-        tft.drawCenterString("Check SSID & Password in code", 120, 130);
-        return;
+        tft.drawCenterString("CONNECTING TO WI-FI...", 120, 95);
+        tft.setTextColor(0x7BEF);
+        tft.drawCenterString(savedSsid, 120, 115);
+
+        WiFi.mode(WIFI_STA);
+        WiFi.begin(savedSsid.c_str(), savedPass.c_str());
+
+        unsigned long startMs = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - startMs < 12000) {
+            delay(300);
+            Serial.print('.');
+        }
+        Serial.println();
+        connected = (WiFi.status() == WL_CONNECTED);
     }
 
-    Serial.printf("[INFO] Wi-Fi Connected! IP: %s\n", WiFi.localIP().toString().c_str());
-
-    // Bind UDP port
-    if (!udp.begin(UDP_PORT)) {
-        Serial.println("[ERROR] Failed to bind UDP port!");
-        tft.fillScreen(TFT_BLACK);
-        tft.setTextColor(TFT_RED);
-        tft.drawCenterString("UDP BIND FAILED", 120, 110);
-        return;
+    if (!connected) {
+        // Fallback to SoftAP Hotspot
+        isApMode = true;
+        Serial.println("[WI-FI] Starting SoftAP Hotspot...");
+        WiFi.mode(WIFI_AP);
+        WiFi.softAP(AP_SSID, AP_PASS);
+        delay(100);
+        Serial.printf("[WI-FI] Hotspot '%s' active! IP: 192.168.4.1\n", AP_SSID);
+    } else {
+        isApMode = false;
+        Serial.printf("[WI-FI] Station connected! IP: %s\n", WiFi.localIP().toString().c_str());
     }
 
-    Serial.printf("[INFO] UDP Listener ready on port %u\n", UDP_PORT);
+    // Start UDP Receiver
+    udp.begin(UDP_PORT);
+    Serial.printf("[UDP] Listening on port %u\n", UDP_PORT);
+
+    // Start WebSocket Server
+    wsServer.begin();
+    Serial.printf("[WS] Server listening on port %u\n", WS_PORT);
+
+    // Start Web Server
+    setupWebServerRoutes();
+
     drawWaitingScreen();
     lastFpsTime = millis();
 }
 
+// =========================================================================
+// MAIN RUNTIME LOOP
+// =========================================================================
 void loop() {
-    if (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        return;
-    }
+    server.handleClient();
+    handleWebSocketClient();
 
+    // Check UDP Packets
     int packetLen = udp.parsePacket();
     if (packetLen > 0) {
         int bytesRead = udp.read(rxPacket, sizeof(rxPacket));
         if (bytesRead >= 4) {
-            // Check for VID0 (128x64 stream)
-            if (memcmp(rxPacket, "VID0", 4) == 0 && bytesRead == VID0_PACKET) {
-                if (!inStreamMode) {
-                    inStreamMode = true;
-                    tft.fillScreen(TFT_BLACK);
-                    drawStreamHud();
-                }
-                renderVid0Frame(rxPacket + 4);
-                frameCount++;
-                lastFrameArrival = millis();
-            }
-            // Check for V240 (240x240 chunk stream: V240 + chunkIdx + totalChunks + seq_msb + seq_lsb + 1200 data)
-            else if (memcmp(rxPacket, "V240", 4) == 0 && bytesRead >= 1208) {
-                if (!inStreamMode) {
-                    inStreamMode = true;
-                    tft.fillScreen(TFT_BLACK);
-                }
-                renderV240Chunk(rxPacket + 4, rxPacket + 8, bytesRead - 8);
-                if (rxPacket[4] == 0) frameCount++;
-                lastFrameArrival = millis();
-            }
+            processRawVideoPayload(rxPacket, bytesRead);
         }
     }
 
-    // Stream timeout -> return to waiting screen after 3 seconds of silence
+    // Stream timeout: return to waiting screen after 3.5s of silence
     if (inStreamMode && (millis() - lastFrameArrival > 3500)) {
         inStreamMode = false;
         drawWaitingScreen();
     }
 
-    // Update FPS calculation and telemetry every second
+    // Telemetry updates
     if (millis() - lastFpsTime >= 1000) {
         currentFps = (float)frameCount * 1000.0f / (float)(millis() - lastFpsTime);
-        if (inStreamMode) {
-            drawStreamHud();
-        }
+        if (inStreamMode) drawStreamHud();
         frameCount = 0;
         lastFpsTime = millis();
     }

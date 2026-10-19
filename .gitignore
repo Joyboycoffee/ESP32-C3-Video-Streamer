@@ -1,6 +1,8 @@
 .pio/
 .vscode/
 __pycache__/
+build/
+dist/
 *.pyc
 *.mp4
 *.avi
