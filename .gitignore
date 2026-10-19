@@ -1,0 +1,8 @@
+.pio/
+.vscode/
+__pycache__/
+*.pyc
+*.mp4
+*.avi
+*.mkv
+*.bin
