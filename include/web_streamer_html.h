@@ -271,6 +271,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
       ctx.putImageData(imgData, 0, 0);
 
       if (socket && socket.readyState === WebSocket.OPEN) {
+        if (socket.bufferedAmount > 8192) return;
         if (targetDisp === 'ssd1306' || targetDisp === 'st7789-hud') {
           const pkt = new Uint8Array(4 + 1024);
           pkt[0]=0x56; pkt[1]=0x49; pkt[2]=0x44; pkt[3]=0x30;
@@ -283,22 +284,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
           }
           socket.send(pkt.buffer); bytesSent += pkt.byteLength; frameCount++;
         } else {
-          const seq = frameCount & 0xFFFF;
-          for (let c = 0; c < 6; c++) {
-            const pkt = new Uint8Array(8 + 1200);
-            pkt[0]=0x56; pkt[1]=0x32; pkt[2]=0x34; pkt[3]=0x30; pkt[4]=c; pkt[5]=6; pkt[6]=(seq>>8)&0xFF; pkt[7]=seq&0xFF;
-            const startY = c * 40;
-            for (let y = 0; y < 40; y++) {
-              const rowY = startY + y, ro = 8 + (y * 30);
-              for (let bx = 0; bx < 30; bx++) {
-                let byteVal = 0, sx = bx * 8;
-                for (let bit = 0; bit < 8; bit++) if (bin[rowY * 240 + (sx + bit)]) byteVal |= (0x80 >> bit);
-                pkt[ro + bx] = byteVal;
-              }
+          const pkt = new Uint8Array(4 + 7200);
+          pkt[0]=0x56; pkt[1]=0x32; pkt[2]=0x34; pkt[3]=0x30;
+          for (let y = 0; y < 240; y++) {
+            const ro = 4 + (y * 30), ry = y * 240;
+            for (let bx = 0; bx < 30; bx++) {
+              let byteVal = 0, sx = bx * 8;
+              for (let bit = 0; bit < 8; bit++) if (bin[ry + sx + bit]) byteVal |= (0x80 >> bit);
+              pkt[ro + bx] = byteVal;
             }
-            socket.send(pkt.buffer); bytesSent += pkt.byteLength;
           }
-          frameCount++;
+          socket.send(pkt.buffer); bytesSent += pkt.byteLength; frameCount++;
         }
       }
       const now = performance.now(), el = (now - lastStatsTime) / 1000.0;

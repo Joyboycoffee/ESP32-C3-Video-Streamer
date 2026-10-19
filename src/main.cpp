@@ -23,6 +23,7 @@ const char* AP_PASS = ""; // Open Hotspot for 1-tap phone connection
 
 // Hardware Instances
 LGFX_ST7789 tft;
+LGFX_Sprite fullCanvas(&tft);
 LGFX_Sprite videoSprite(&tft);
 WiFiUDP udp;
 WebServer server(HTTP_PORT);
@@ -34,6 +35,7 @@ Preferences prefs;
 bool isApMode = false;
 bool wsHandshakeDone = false;
 bool inStreamMode = false;
+bool isVid0Active = false;
 unsigned long lastFrameArrival = 0;
 unsigned long frameCount = 0;
 unsigned long lastFpsTime = 0;
@@ -44,7 +46,7 @@ const uint16_t THEME_COLORS[] = { TFT_WHITE, 0x07FF, 0x07E0, 0xFBE0 };
 
 // Buffers
 uint8_t rxPacket[1500];
-uint8_t wsBuffer[2048];
+uint8_t wsBuffer[8192];
 
 // =========================================================================
 // WEBSOCKET RFC 6455 HANDSHAKE (ZERO-DEPENDENCY MBEDTLS)
@@ -133,64 +135,67 @@ void drawStreamHud() {
 }
 
 void renderVid0Frame(const uint8_t* raw) {
-    uint16_t onColor = THEME_COLORS[colorTheme];
-    videoSprite.startWrite();
+    uint8_t* buf = (uint8_t*)videoSprite.getBuffer();
+    if (!buf) return;
+    memset(buf, 0, 1024);
     for (int p = 0; p < 8; p++) {
         int baseY = p * 8;
         int pageOffset = p * 128;
         for (int x = 0; x < 128; x++) {
             uint8_t byteVal = raw[pageOffset + x];
+            if (!byteVal) continue;
+            int byteX = x >> 3;
+            uint8_t mask = 0x80 >> (x & 7);
             for (int b = 0; b < 8; b++) {
-                uint16_t col = (byteVal & (1 << b)) ? onColor : TFT_BLACK;
-                videoSprite.drawPixel(x, baseY + b, col);
+                if (byteVal & (1 << b)) {
+                    buf[(baseY + b) * 16 + byteX] |= mask;
+                }
             }
         }
     }
-    videoSprite.endWrite();
     videoSprite.pushRotateZoom(120, 120, 0.0f, 1.875f, 1.875f);
 }
 
-void renderV240Chunk(const uint8_t* chunkHeader, const uint8_t* data, size_t len) {
-    uint8_t chunkIdx = chunkHeader[0];
-    if (chunkIdx >= 6) return;
-    int startY = chunkIdx * 40;
-    uint16_t onColor = THEME_COLORS[colorTheme];
-    tft.startWrite();
-    for (int y = 0; y < 40; y++) {
-        int rowOffset = y * 30;
-        int screenY = startY + y;
-        for (int bx = 0; bx < 30; bx++) {
-            uint8_t b = data[rowOffset + bx];
-            int startX = bx * 8;
-            for (int bit = 0; bit < 8; bit++) {
-                uint16_t c = (b & (0x80 >> bit)) ? onColor : TFT_BLACK;
-                tft.drawPixel(startX + bit, screenY, c);
-            }
-        }
-    }
-    tft.endWrite();
-}
-
 // =========================================================================
-// WEBSOCKET DATA FRAME PROCESSOR
+// WEBSOCKET & UDP VIDEO FRAME PROCESSOR (INSTANT DMA BLIT)
 // =========================================================================
 void processRawVideoPayload(const uint8_t* data, size_t len) {
     if (len >= 4 && memcmp(data, "VID0", 4) == 0 && len >= VID0_PACKET) {
-        if (!inStreamMode) {
+        if (!inStreamMode || !isVid0Active) {
             inStreamMode = true;
+            isVid0Active = true;
             tft.fillScreen(TFT_BLACK);
             drawStreamHud();
         }
         renderVid0Frame(data + 4);
         frameCount++;
         lastFrameArrival = millis();
-    } else if (len >= 8 && memcmp(data, "V240", 4) == 0 && len >= 1208) {
-        if (!inStreamMode) {
+    } else if (len >= 4 && memcmp(data, "V240", 4) == 0) {
+        if (!inStreamMode || isVid0Active) {
             inStreamMode = true;
+            isVid0Active = false;
             tft.fillScreen(TFT_BLACK);
         }
-        renderV240Chunk(data + 4, data + 8, len - 8);
-        if (data[4] == 0) frameCount++;
+        uint8_t* canvasBuf = (uint8_t*)fullCanvas.getBuffer();
+        if (canvasBuf) {
+            if (len >= 7204) {
+                // Direct full-frame stream (4B header + 7200B bitmap)
+                memcpy(canvasBuf, data + 4, 7200);
+                fullCanvas.pushSprite(0, 0);
+                frameCount++;
+            } else if (len >= 1208) {
+                // Chunked stream (4B header + chunkIdx(1B) + total(1B) + seq(2B) + 1200B data)
+                uint8_t chunkIdx = data[4];
+                if (chunkIdx < 6) {
+                    memcpy(canvasBuf + (chunkIdx * 1200), data + 8, 1200);
+                    // Blit atomically to display only when final chunk arrives (zero tearing!)
+                    if (chunkIdx == 5) {
+                        fullCanvas.pushSprite(0, 0);
+                        frameCount++;
+                    }
+                }
+            }
+        }
         lastFrameArrival = millis();
     }
 }
@@ -269,13 +274,18 @@ void handleWebSocketClient() {
         }
 
         size_t bytesRead = 0;
-        while (bytesRead < payloadLen) {
-            if (wsClient.available()) {
-                wsBuffer[bytesRead++] = wsClient.read();
+        unsigned long readStart = millis();
+        while (bytesRead < payloadLen && (millis() - readStart < 250)) {
+            size_t avail = wsClient.available();
+            if (avail > 0) {
+                size_t toRead = (payloadLen - bytesRead < avail) ? (payloadLen - bytesRead) : avail;
+                int r = wsClient.read(wsBuffer + bytesRead, toRead);
+                if (r > 0) bytesRead += r;
             } else {
-                delay(1);
+                delayMicroseconds(50);
             }
         }
+        if (bytesRead < payloadLen) return;
 
         if (isMasked) {
             for (size_t i = 0; i < payloadLen; i++) {
@@ -338,6 +348,15 @@ void setupWebServerRoutes() {
         server.send(200, "application/json", json);
     });
 
+    server.on("/theme", HTTP_GET, []() {
+        if (server.hasArg("id")) {
+            colorTheme = server.arg("id").toInt() % 4;
+            fullCanvas.setPaletteColor(1, THEME_COLORS[colorTheme]);
+            videoSprite.setPaletteColor(1, THEME_COLORS[colorTheme]);
+        }
+        server.send(200, "text/plain", String(colorTheme));
+    });
+
     server.begin();
     Serial.println("[HTTP] Web Server started on port 80");
 }
@@ -357,8 +376,24 @@ void setup() {
     tft.setBrightness(255);
     tft.fillScreen(TFT_BLACK);
 
-    videoSprite.setColorDepth(16);
-    videoSprite.createSprite(128, 64);
+    fullCanvas.setColorDepth(1);
+    if (!fullCanvas.createSprite(240, 240)) {
+        Serial.println("[ERROR] Failed to allocate fullCanvas sprite!");
+    } else {
+        fullCanvas.setPaletteColor(0, TFT_BLACK);
+        fullCanvas.setPaletteColor(1, THEME_COLORS[colorTheme]);
+        fullCanvas.fillSprite(0);
+        Serial.println("[DISPLAY] 240x240 1-bit DMA Sprite allocated (7200 bytes)");
+    }
+
+    videoSprite.setColorDepth(1);
+    if (!videoSprite.createSprite(128, 64)) {
+        Serial.println("[ERROR] Failed to allocate videoSprite!");
+    } else {
+        videoSprite.setPaletteColor(0, TFT_BLACK);
+        videoSprite.setPaletteColor(1, THEME_COLORS[colorTheme]);
+        videoSprite.fillSprite(0);
+    }
 
     prefs.begin("stream_wifi", false);
     String savedSsid = prefs.getString("ssid", "");
@@ -412,8 +447,8 @@ void loop() {
     server.handleClient();
     handleWebSocketClient();
 
-    int packetLen = udp.parsePacket();
-    if (packetLen > 0) {
+    int maxUdp = 12;
+    while (maxUdp-- > 0 && udp.parsePacket() > 0) {
         int bytesRead = udp.read(rxPacket, sizeof(rxPacket));
         if (bytesRead >= 4) {
             processRawVideoPayload(rxPacket, bytesRead);
@@ -427,7 +462,7 @@ void loop() {
 
     if (millis() - lastFpsTime >= 1000) {
         currentFps = (float)frameCount * 1000.0f / (float)(millis() - lastFpsTime);
-        if (inStreamMode) drawStreamHud();
+        if (inStreamMode && isVid0Active) drawStreamHud();
         frameCount = 0;
         lastFpsTime = millis();
     }

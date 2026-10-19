@@ -1,3 +1,4 @@
+#include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include <WebServer.h>
@@ -22,6 +23,7 @@ const char* AP_PASS = ""; // Open Hotspot for 1-tap phone connection
 
 // Hardware Instances
 LGFX_ST7789 tft;
+LGFX_Sprite fullCanvas(&tft);
 LGFX_Sprite videoSprite(&tft);
 WiFiUDP udp;
 WebServer server(HTTP_PORT);
@@ -33,6 +35,7 @@ Preferences prefs;
 bool isApMode = false;
 bool wsHandshakeDone = false;
 bool inStreamMode = false;
+bool isVid0Active = false;
 unsigned long lastFrameArrival = 0;
 unsigned long frameCount = 0;
 unsigned long lastFpsTime = 0;
@@ -43,7 +46,7 @@ const uint16_t THEME_COLORS[] = { TFT_WHITE, 0x07FF, 0x07E0, 0xFBE0 };
 
 // Buffers
 uint8_t rxPacket[1500];
-uint8_t wsBuffer[2048];
+uint8_t wsBuffer[8192];
 
 // =========================================================================
 // WEBSOCKET RFC 6455 HANDSHAKE (ZERO-DEPENDENCY MBEDTLS)
@@ -132,64 +135,67 @@ void drawStreamHud() {
 }
 
 void renderVid0Frame(const uint8_t* raw) {
-    uint16_t onColor = THEME_COLORS[colorTheme];
-    videoSprite.startWrite();
+    uint8_t* buf = (uint8_t*)videoSprite.getBuffer();
+    if (!buf) return;
+    memset(buf, 0, 1024);
     for (int p = 0; p < 8; p++) {
         int baseY = p * 8;
         int pageOffset = p * 128;
         for (int x = 0; x < 128; x++) {
             uint8_t byteVal = raw[pageOffset + x];
+            if (!byteVal) continue;
+            int byteX = x >> 3;
+            uint8_t mask = 0x80 >> (x & 7);
             for (int b = 0; b < 8; b++) {
-                uint16_t col = (byteVal & (1 << b)) ? onColor : TFT_BLACK;
-                videoSprite.drawPixel(x, baseY + b, col);
+                if (byteVal & (1 << b)) {
+                    buf[(baseY + b) * 16 + byteX] |= mask;
+                }
             }
         }
     }
-    videoSprite.endWrite();
     videoSprite.pushRotateZoom(120, 120, 0.0f, 1.875f, 1.875f);
 }
 
-void renderV240Chunk(const uint8_t* chunkHeader, const uint8_t* data, size_t len) {
-    uint8_t chunkIdx = chunkHeader[0];
-    if (chunkIdx >= 6) return;
-    int startY = chunkIdx * 40;
-    uint16_t onColor = THEME_COLORS[colorTheme];
-    tft.startWrite();
-    for (int y = 0; y < 40; y++) {
-        int rowOffset = y * 30;
-        int screenY = startY + y;
-        for (int bx = 0; bx < 30; bx++) {
-            uint8_t b = data[rowOffset + bx];
-            int startX = bx * 8;
-            for (int bit = 0; bit < 8; bit++) {
-                uint16_t c = (b & (0x80 >> bit)) ? onColor : TFT_BLACK;
-                tft.drawPixel(startX + bit, screenY, c);
-            }
-        }
-    }
-    tft.endWrite();
-}
-
 // =========================================================================
-// WEBSOCKET DATA FRAME PROCESSOR
+// WEBSOCKET & UDP VIDEO FRAME PROCESSOR (INSTANT DMA BLIT)
 // =========================================================================
 void processRawVideoPayload(const uint8_t* data, size_t len) {
     if (len >= 4 && memcmp(data, "VID0", 4) == 0 && len >= VID0_PACKET) {
-        if (!inStreamMode) {
+        if (!inStreamMode || !isVid0Active) {
             inStreamMode = true;
+            isVid0Active = true;
             tft.fillScreen(TFT_BLACK);
             drawStreamHud();
         }
         renderVid0Frame(data + 4);
         frameCount++;
         lastFrameArrival = millis();
-    } else if (len >= 8 && memcmp(data, "V240", 4) == 0 && len >= 1208) {
-        if (!inStreamMode) {
+    } else if (len >= 4 && memcmp(data, "V240", 4) == 0) {
+        if (!inStreamMode || isVid0Active) {
             inStreamMode = true;
+            isVid0Active = false;
             tft.fillScreen(TFT_BLACK);
         }
-        renderV240Chunk(data + 4, data + 8, len - 8);
-        if (data[4] == 0) frameCount++;
+        uint8_t* canvasBuf = (uint8_t*)fullCanvas.getBuffer();
+        if (canvasBuf) {
+            if (len >= 7204) {
+                // Direct full-frame stream (4B header + 7200B bitmap)
+                memcpy(canvasBuf, data + 4, 7200);
+                fullCanvas.pushSprite(0, 0);
+                frameCount++;
+            } else if (len >= 1208) {
+                // Chunked stream (4B header + chunkIdx(1B) + total(1B) + seq(2B) + 1200B data)
+                uint8_t chunkIdx = data[4];
+                if (chunkIdx < 6) {
+                    memcpy(canvasBuf + (chunkIdx * 1200), data + 8, 1200);
+                    // Blit atomically to display only when final chunk arrives (zero tearing!)
+                    if (chunkIdx == 5) {
+                        fullCanvas.pushSprite(0, 0);
+                        frameCount++;
+                    }
+                }
+            }
+        }
         lastFrameArrival = millis();
     }
 }
@@ -205,7 +211,6 @@ void handleWebSocketClient() {
     if (!wsClient || !wsClient.connected()) return;
 
     if (!wsHandshakeDone) {
-        // Read HTTP upgrade request
         String req = "";
         while (wsClient.available()) {
             req += (char)wsClient.read();
@@ -232,7 +237,6 @@ void handleWebSocketClient() {
         return;
     }
 
-    // Process RFC 6455 Binary Frames
     while (wsClient.available() >= 2) {
         uint8_t b0 = wsClient.read();
         uint8_t b1 = wsClient.read();
@@ -240,7 +244,7 @@ void handleWebSocketClient() {
         bool isMasked = (b1 & 0x80) != 0;
         size_t payloadLen = b1 & 0x7F;
 
-        if (opcode == 0x08) { // Connection Close
+        if (opcode == 0x08) {
             wsClient.stop();
             wsHandshakeDone = false;
             return;
@@ -261,7 +265,6 @@ void handleWebSocketClient() {
         }
 
         if (payloadLen > sizeof(wsBuffer)) {
-            // Drain oversized frame
             size_t drained = 0;
             while (drained < payloadLen && wsClient.available()) {
                 wsClient.read();
@@ -271,13 +274,18 @@ void handleWebSocketClient() {
         }
 
         size_t bytesRead = 0;
-        while (bytesRead < payloadLen) {
-            if (wsClient.available()) {
-                wsBuffer[bytesRead++] = wsClient.read();
+        unsigned long readStart = millis();
+        while (bytesRead < payloadLen && (millis() - readStart < 250)) {
+            size_t avail = wsClient.available();
+            if (avail > 0) {
+                size_t toRead = (payloadLen - bytesRead < avail) ? (payloadLen - bytesRead) : avail;
+                int r = wsClient.read(wsBuffer + bytesRead, toRead);
+                if (r > 0) bytesRead += r;
             } else {
-                delay(1);
+                delayMicroseconds(50);
             }
         }
+        if (bytesRead < payloadLen) return;
 
         if (isMasked) {
             for (size_t i = 0; i < payloadLen; i++) {
@@ -285,7 +293,6 @@ void handleWebSocketClient() {
             }
         }
 
-        // Forward unmasked payload to video render pipeline
         processRawVideoPayload(wsBuffer, payloadLen);
     }
 }
@@ -294,12 +301,10 @@ void handleWebSocketClient() {
 // HTTP WEBSERVER ROUTES (SCAN, SAVE, RESET, STATUS, WEB DECK)
 // =========================================================================
 void setupWebServerRoutes() {
-    // Serve main HTML5 video deck
     server.on("/", HTTP_GET, []() {
         server.send_P(200, "text/html", INDEX_HTML);
     });
 
-    // Wi-Fi network scanner
     server.on("/scan", HTTP_GET, []() {
         int n = WiFi.scanNetworks();
         String json = "[";
@@ -311,7 +316,6 @@ void setupWebServerRoutes() {
         server.send(200, "application/json", json);
     });
 
-    // Save credentials & restart
     server.on("/save-wifi", HTTP_POST, []() {
         String ssid = server.arg("ssid");
         String pass = server.arg("pass");
@@ -326,7 +330,6 @@ void setupWebServerRoutes() {
         }
     });
 
-    // Reset to AP Hotspot mode
     server.on("/reset-wifi", HTTP_POST, []() {
         prefs.remove("ssid");
         prefs.remove("pass");
@@ -335,7 +338,6 @@ void setupWebServerRoutes() {
         ESP.restart();
     });
 
-    // System status
     server.on("/status", HTTP_GET, []() {
         String json = "{\"ap\":";
         json += isApMode ? "true" : "false";
@@ -344,6 +346,15 @@ void setupWebServerRoutes() {
         json += ",\"frames\":" + String(frameCount);
         json += "}";
         server.send(200, "application/json", json);
+    });
+
+    server.on("/theme", HTTP_GET, []() {
+        if (server.hasArg("id")) {
+            colorTheme = server.arg("id").toInt() % 4;
+            fullCanvas.setPaletteColor(1, THEME_COLORS[colorTheme]);
+            videoSprite.setPaletteColor(1, THEME_COLORS[colorTheme]);
+        }
+        server.send(200, "text/plain", String(colorTheme));
     });
 
     server.begin();
@@ -360,16 +371,30 @@ void setup() {
     Serial.println("  ESP32-C3 ST7789 VIDEO STREAMER (WEB & UDP)  ");
     Serial.println("==============================================");
 
-    // Init Display
     tft.init();
     tft.setRotation(0);
     tft.setBrightness(255);
     tft.fillScreen(TFT_BLACK);
 
-    videoSprite.setColorDepth(16);
-    videoSprite.createSprite(128, 64);
+    fullCanvas.setColorDepth(1);
+    if (!fullCanvas.createSprite(240, 240)) {
+        Serial.println("[ERROR] Failed to allocate fullCanvas sprite!");
+    } else {
+        fullCanvas.setPaletteColor(0, TFT_BLACK);
+        fullCanvas.setPaletteColor(1, THEME_COLORS[colorTheme]);
+        fullCanvas.fillSprite(0);
+        Serial.println("[DISPLAY] 240x240 1-bit DMA Sprite allocated (7200 bytes)");
+    }
 
-    // Read stored Wi-Fi credentials from NVS Flash
+    videoSprite.setColorDepth(1);
+    if (!videoSprite.createSprite(128, 64)) {
+        Serial.println("[ERROR] Failed to allocate videoSprite!");
+    } else {
+        videoSprite.setPaletteColor(0, TFT_BLACK);
+        videoSprite.setPaletteColor(1, THEME_COLORS[colorTheme]);
+        videoSprite.fillSprite(0);
+    }
+
     prefs.begin("stream_wifi", false);
     String savedSsid = prefs.getString("ssid", "");
     String savedPass = prefs.getString("pass", "");
@@ -396,7 +421,6 @@ void setup() {
     }
 
     if (!connected) {
-        // Fallback to SoftAP Hotspot
         isApMode = true;
         Serial.println("[WI-FI] Starting SoftAP Hotspot...");
         WiFi.mode(WIFI_AP);
@@ -408,15 +432,8 @@ void setup() {
         Serial.printf("[WI-FI] Station connected! IP: %s\n", WiFi.localIP().toString().c_str());
     }
 
-    // Start UDP Receiver
     udp.begin(UDP_PORT);
-    Serial.printf("[UDP] Listening on port %u\n", UDP_PORT);
-
-    // Start WebSocket Server
     wsServer.begin();
-    Serial.printf("[WS] Server listening on port %u\n", WS_PORT);
-
-    // Start Web Server
     setupWebServerRoutes();
 
     drawWaitingScreen();
@@ -430,25 +447,22 @@ void loop() {
     server.handleClient();
     handleWebSocketClient();
 
-    // Check UDP Packets
-    int packetLen = udp.parsePacket();
-    if (packetLen > 0) {
+    int maxUdp = 12;
+    while (maxUdp-- > 0 && udp.parsePacket() > 0) {
         int bytesRead = udp.read(rxPacket, sizeof(rxPacket));
         if (bytesRead >= 4) {
             processRawVideoPayload(rxPacket, bytesRead);
         }
     }
 
-    // Stream timeout: return to waiting screen after 3.5s of silence
     if (inStreamMode && (millis() - lastFrameArrival > 3500)) {
         inStreamMode = false;
         drawWaitingScreen();
     }
 
-    // Telemetry updates
     if (millis() - lastFpsTime >= 1000) {
         currentFps = (float)frameCount * 1000.0f / (float)(millis() - lastFpsTime);
-        if (inStreamMode) drawStreamHud();
+        if (inStreamMode && isVid0Active) drawStreamHud();
         frameCount = 0;
         lastFpsTime = millis();
     }
